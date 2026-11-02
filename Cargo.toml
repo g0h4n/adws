@@ -1,0 +1,83 @@
+[package]
+name = "adws"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A Rust ADWS (Active Directory Web Services) client with ldap3-compatible types, a drop-in alternate transport for RustHound-CE."
+license = "MIT"
+repository = "https://github.com/g0h4n/adws"
+keywords = ["adws", "active-directory", "ldap", "bloodhound", "soap"]
+categories = ["network-programming", "authentication"]
+
+[features]
+default = []
+# Reuse ldap3's public types (SearchEntry, Scope) and enable From conversions,
+# so adws becomes a drop-in alternate transport for ldap3-based tools.
+ldap3 = ["dep:ldap3"]
+# NTLM / Kerberos / Negotiate tokens + message sign/seal via Devolutions sspi-rs.
+sspi-auth = ["dep:sspi"]
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time"] }
+quick-xml = "0.36"
+base64 = "0.22"
+byteorder = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+
+# Optional: type compatibility with the ldap3 crate (feature = "ldap3").
+ldap3 = { version = "0.12", default-features = false, optional = true }
+# Optional: SSPI provider for the NNS handshake (feature = "sspi-auth").
+# Pinned to 0.16.x on purpose: this is the same sspi that ldap3 0.12's `ntlm`
+# feature pulls, so a consumer like RustHound-CE ends up with a single sspi in
+# the graph (0.23 would force picky rc.26 and break ldap3's sspi 0.16.1).
+sspi = { version = "0.16.1", optional = true }
+# sspi 0.16.1 only builds against these exact picky versions (its kerberos/pku2u
+# modules break on newer picky rc's). Same pins RustHound-CE already carries;
+# declared here (even though unused directly) so adws builds standalone.
+picky = "=7.0.0-rc.17"
+picky-krb = "=0.11.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.11"
+
+# Examples need a live connection (sspi-auth); some also use ldap3 types.
+# required-features keeps `cargo test` / `cargo build` (no features) from
+# compiling them.
+[[example]]
+name = "smoke_connect"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "env_search"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "connect_search"
+required-features = ["ldap3", "sspi-auth"]
+
+[[example]]
+name = "connect_username_password"
+required-features = ["ldap3", "sspi-auth"]
+
+[[example]]
+name = "connect_pth"
+required-features = ["ldap3", "sspi-auth"]
+
+[[example]]
+name = "toggle_account"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "add_computer"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "del_computer"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "rbcd"
+required-features = ["sspi-auth"]
