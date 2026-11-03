@@ -35,8 +35,9 @@ cargo test ws::nbfx
 ```
 
 The test suite covers the deterministic layers (framing, NBFSE codec, the static
-dictionary, `SearchEntry` mapping, and PullResponse extraction). It does **not**
-yet include an integration test against a live Domain Controller.
+dictionary, `SearchEntry` mapping, PullResponse extraction, and the
+`GetADGroupMember` request/response). It does **not** yet include an integration
+test against a live Domain Controller.
 
 ## How to build the documentation?
 
@@ -53,7 +54,7 @@ Levels used:
 - `error!` - an unrecoverable condition about to be returned (e.g. an auth
   mechanism that is not wired).
 - `warn!`  - a recoverable oddity (a SOAP fault, a missing Configuration NC).
-- `info!`  - milestones: connect, handshake complete, search start/end + counts.
+- `debug!`  - milestones: connect, handshake complete, search start/end + counts.
 - `debug!` - per-exchange and per-Pull-batch progress, naming contexts.
 - `trace!` - wire detail: NMF preamble/upgrade, NNS handshake and data frame
   sizes, the full request XML, sized-envelope reassembly.
@@ -95,6 +96,13 @@ let entries = client.search(
     Some(SdFlags::OWNER_DACL),
     false,
 ).await?;
+
+// Full membership of a large group, past the 1500 MaxValRange cap
+// (MS-ADCAP GetADGroupMember, the SOAP equivalent of Get-ADGroupMember)
+let members = client.group_members("CN=GS-TEST01,OU=TEST01,DC=essos,DC=local", false).await?;
+for m in &members {
+    println!("{}", m.dn);
+}
 ```
 
 ## Authentication modes
@@ -129,6 +137,7 @@ target and credentials from `ADWS_*` environment variables.
 | `connect_pth` | `ldap3 sspi-auth` | Pass-the-hash (NT hash) auth. |
 | `connect_search` | `ldap3 sspi-auth` | Naming contexts + a user search (constants in the file). |
 | `env_search` | `ldap3 sspi-auth` | Env-driven search (`ADWS_BASE` / `ADWS_FILTER`). |
+| `group_members` | `sspi-auth` | Full group membership via `GetADGroupMember`, past the 1500 `member` cap (`ADWS_DN` = group name or DN, `ADWS_PRINT_ALL=1` to list all). |
 | `toggle_account` | `sspi-auth` | **Write**: toggle `userAccountControl` (string write). |
 | `rbcd` | `sspi-auth` | **Write**: RBCD security descriptor (binary write). |
 | `add_computer` | `sspi-auth` | **Create**: new machine account via WS-Transfer `Create`. |
