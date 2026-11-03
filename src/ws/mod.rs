@@ -8,6 +8,7 @@
 //! implied by KnownEncoding 0x08), not text. The builders here produce the
 //! logical SOAP; the NBFSE codec sits between them and the NNS channel bytes.
 
+pub mod account;
 pub mod envelope;
 pub mod mapping;
 pub mod nbfs_dict;
