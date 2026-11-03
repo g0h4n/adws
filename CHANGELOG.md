@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.1.1 - 2026-11-03
+
+### Added
+
+- `AdwsClient::group_members` / `group_members_in`: enumerate a group's **full**
+  membership through the MS-ADCAP `GetADGroupMember` custom action over the
+  `Windows/AccountManagement` endpoint (the SOAP equivalent of the
+  `Get-ADGroupMember` cmdlet), with an optional `recursive` flag to expand
+  nested groups server-side.
+- `GroupMember` type (`dn`, `name`, `object_class`, `object_guid`, `sid`,
+  `sam_account_name`), re-exported at the crate root.
+- `group_members` example: resolves a group by name or DN, then prints the
+  capped `member` count from a plain search next to the complete membership from
+  `GetADGroupMember` (set `ADWS_PRINT_ALL=1` to list every member).
+
+### Fixed
+
+- **Large groups over ADWS.** Active Directory caps a multivalued attribute at
+  `MaxValRange` (default 1500) per search, and ADWS does **not** accept the LDAP
+  ranged-retrieval option (`member;range=lo-hi`) in a selection property (it
+  faults with `The specified AttributeType is not valid`). A group's `member`
+  list was therefore silently truncated at 1500 with no `;range=` signal to act
+  on. It is now completed with `GetADGroupMember`, which resolves the whole
+  membership server-side. The RustHound-CE `--transport soap` collector applies
+  this automatically for any group whose `member` reaches the cap.
+
+### Validated
+
+- Live against GOAD: a 2000-member group returned 1500 via a plain search and
+  the full 2000 via `GetADGroupMember` (500 recovered), DNs matching the LDAP
+  collector.
+
 ## 0.1.0 - 2026-11-02
 
 First release. A pure-Rust client for **Active Directory Web Services** (ADWS,
