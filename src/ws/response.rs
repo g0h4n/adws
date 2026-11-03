@@ -29,15 +29,34 @@ fn local_eq(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
-fn find_descendant<'a>(node: &'a NbfxNode, local: &str) -> Option<&'a NbfxNode> {
+pub(crate) fn find_descendant<'a>(node: &'a NbfxNode, local: &str) -> Option<&'a NbfxNode> {
     if local_eq(&node.name, local) {
         return Some(node);
     }
     node.children.iter().find_map(|c| find_descendant(c, local))
 }
 
-fn find_child<'a>(node: &'a NbfxNode, local: &str) -> Option<&'a NbfxNode> {
+pub(crate) fn find_child<'a>(node: &'a NbfxNode, local: &str) -> Option<&'a NbfxNode> {
     node.children.iter().find(|c| local_eq(&c.name, local))
+}
+
+/// Collect every descendant (and the node itself) whose local name matches,
+/// without descending into a match's own subtree. Used to gather repeated
+/// response elements (e.g. MS-ADCAP `ActiveDirectoryPrincipal`) robustly,
+/// regardless of the exact wrapper element around them.
+pub(crate) fn collect_descendants<'a>(node: &'a NbfxNode, local: &str, out: &mut Vec<&'a NbfxNode>) {
+    if local_eq(&node.name, local) {
+        out.push(node);
+        return;
+    }
+    for c in &node.children {
+        collect_descendants(c, local, out);
+    }
+}
+
+/// Text of the first direct child with the given local name, trimmed.
+pub(crate) fn child_text(node: &NbfxNode, local: &str) -> Option<String> {
+    find_child(node, local).map(|n| n.text.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Read an attribute by local name (ignoring any `prefix:` on the stored key).
@@ -181,6 +200,30 @@ mod tests {
         pr.children.push(el("EndOfSequence"));
         let r = parse_pull_response(&env).unwrap();
         assert!(r.end_of_sequence);
+    }
+
+    #[test]
+    fn collect_descendants_gathers_repeated_elements() {
+        let mut wrap = el("Members");
+        wrap.children.push(el("ActiveDirectoryPrincipal"));
+        wrap.children.push(el("ActiveDirectoryPrincipal"));
+        let mut resp = el("GetADGroupMemberResponse");
+        resp.children.push(wrap);
+
+        let mut out = Vec::new();
+        collect_descendants(&resp, "ActiveDirectoryPrincipal", &mut out);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn child_text_reads_direct_child() {
+        let mut p = el("ActiveDirectoryPrincipal");
+        p.children.push(value_node("")); // unrelated
+        let mut dn = el("DistinguishedName");
+        dn.text = "  CN=a,DC=x  ".into();
+        p.children.push(dn);
+        assert_eq!(child_text(&p, "DistinguishedName").as_deref(), Some("CN=a,DC=x"));
+        assert_eq!(child_text(&p, "SID"), None);
     }
 }
 
