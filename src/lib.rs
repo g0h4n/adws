@@ -43,7 +43,8 @@ pub mod types;
 pub mod ws;
 
 pub use auth::Credentials;
-pub use client::AdwsClient;
+pub use client::{AdwsClient, DEFAULT_PULL_BATCH};
 pub use control::SdFlags;
 pub use error::{AdwsError, Result};
 pub use types::{Mod, Scope, SearchEntry, Value};
+pub use ws::account::GroupMember;
