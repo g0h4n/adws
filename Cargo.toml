@@ -1,6 +1,6 @@
 [package]
 name = "adws"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "A Rust ADWS (Active Directory Web Services) client with ldap3-compatible types, a drop-in alternate transport for RustHound-CE."
@@ -80,4 +80,8 @@ required-features = ["sspi-auth"]
 
 [[example]]
 name = "rbcd"
+required-features = ["sspi-auth"]
+
+[[example]]
+name = "group_members"
 required-features = ["sspi-auth"]
