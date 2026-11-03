@@ -13,6 +13,7 @@ let entries = client.search(base, scope, filter, attrs, sd_flags, false).await?;
 - [Add the dependency](#add-the-dependency)
 - [Quick start](#quick-start)
 - [ldap3 compatibility](#ldap3-compatibility)
+- [Large groups (past MaxValRange)](#large-groups-past-maxvalrange)
 - [Wiring it into RustHound-CE](#wiring-it-into-rusthound-ce)
 - [Feature flags](#feature-flags)
 - [API surface](#api-surface)
@@ -65,6 +66,23 @@ The split matches ldap3 exactly: UTF-8 values in `attrs`, raw bytes in
 `msDS-KeyCredentialLink`, …). The binary/text decision follows the object's
 `LdapSyntax` as sent by ADWS.
 
+## Large groups (past MaxValRange)
+
+A search returns at most `MaxValRange` (default 1500) values of a multivalued
+attribute, and ADWS does not support the LDAP ranged-retrieval option
+(`member;range=lo-hi`) in a selection, so a big group's `member` list comes back
+silently truncated at 1500. Use the MS-ADCAP `GetADGroupMember` custom action to
+get the complete membership (resolved server-side, no cap):
+
+```rust
+// direct members; pass `true` to expand nested groups server-side
+let members = client.group_members("CN=GS-TEST01,OU=TEST01,DC=essos,DC=local", false).await?;
+for m in &members {
+    println!("{}  {}  {}", m.dn, m.sam_account_name, m.object_class);
+}
+// group_members_in(group_dn, partition_dn, recursive) sets the partition explicitly
+```
+
 ## Wiring it into RustHound-CE
 
 RustHound-CE funnels every directory read through three functions in
@@ -78,10 +96,16 @@ soap|ldap` switch with **no change** to `objects/*` or the JSON maker:
 | `ldap_auth`                | `AdwsClient::connect`                     |
 | `get_all_naming_contexts`  | `AdwsClient::naming_contexts`             |
 | `collect_from_ldap_into`   | `AdwsClient::search_streaming` => `.into()` => `LdapSearchEntry` |
+| ranged retrieval (`member;range=`) | `AdwsClient::group_members` (`GetADGroupMember`) |
 | `LDAP_SERVER_SD_FLAGS`      | `SdFlags::OWNER_DACL` (same OID + value)  |
 
 Only the LDAP-queried slice moves to ADWS; the RPC/SMB modules (sessions, SAMR
 local groups, SYSVOL/GPO) keep their own protocols.
+
+Groups larger than `MaxValRange` (1500) are completed with `GetADGroupMember`
+over `Windows/AccountManagement`, so the `member` list matches what the LDAP
+collector reconstructs with ranged retrieval. The `adws` transport does this
+automatically for any group whose `member` reaches the cap.
 
 ## Feature flags
 
@@ -91,7 +115,10 @@ integration, `sspi-auth` for a live connection.
 ## API surface
 
 - `AdwsClient::connect`, `naming_contexts`, `search`, `search_streaming`
-- `types::{SearchEntry, Scope, Mod}` - `Mod` reserved for the write phase
+- `AdwsClient::group_members` / `group_members_in` => `Vec<GroupMember>` (MS-ADCAP `GetADGroupMember`)
+- `AdwsClient::create`, `modify`, `delete` - the WS-Transfer write path
+- `types::{SearchEntry, Scope, Mod, Value}`
+- `GroupMember`
 - `control::SdFlags`
 - `auth::{Credentials, SspiProvider}`
-- `transport::{nmf, nns}`, `ws::{nbfx, nbfs_dict, mapping, response, envelope}`
+- `transport::{nmf, nns}`, `ws::{nbfx, nbfs_dict, mapping, response, envelope, transfer, account}`
