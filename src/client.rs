@@ -8,7 +8,7 @@
 //! message, PreambleEnd/Ack over the secured channel) is marked VERIFY and
 //! should be confirmed against a live capture.
 
-use log::{debug, info, trace, warn};
+use log::{debug, trace, warn};
 use tokio::net::TcpStream;
 
 use crate::auth::Credentials;
@@ -16,11 +16,17 @@ use crate::control::SdFlags;
 use crate::error::{AdwsError, Result};
 use crate::transport::{nmf, NmfConnection, SecureChannel};
 use crate::types::{Mod, Scope, SearchEntry, Value};
+use crate::ws::account::{self, GroupMember};
 use crate::ws::envelope::{build_enumerate_request, build_pull_request};
 use crate::ws::nbfx::{decode_nbfse, encode_nbfse_request, NbfseSession, NbfxNode};
 use crate::ws::{response, transfer};
 
-const PULL_BATCH: usize = 256;
+/// Default number of objects requested per WS-Enumeration `Pull`
+/// (`MaxElements`) when a caller does not specify one. Larger batches mean
+/// fewer round-trips on big naming contexts, at a higher per-response memory
+/// cost. Override per call with the `batch` argument of
+/// [`AdwsClient::search_streaming`].
+pub const DEFAULT_PULL_BATCH: usize = 512;
 
 /// Where to reach the DC's ADWS endpoint.
 #[derive(Debug, Clone)]
@@ -56,6 +62,7 @@ pub struct AdwsClient {
     enumeration: Endpoint,
     resource: Option<Endpoint>,
     resource_factory: Option<Endpoint>,
+    account_management: Option<Endpoint>,
     target: Target,
     creds: Credentials,
 }
@@ -65,7 +72,14 @@ impl AdwsClient {
     /// given credentials. Analogue of RustHound-CE's `ldap_auth`.
     pub async fn connect(target: Target, creds: Credentials) -> Result<Self> {
         let enumeration = connect_endpoint(&target, &creds, "Windows/Enumeration").await?;
-        Ok(Self { enumeration, resource: None, resource_factory: None, target, creds })
+        Ok(Self {
+            enumeration,
+            resource: None,
+            resource_factory: None,
+            account_management: None,
+            target,
+            creds,
+        })
     }
 
     /// Enumerate RootDSE `namingContexts` (Schema / Domain / Configuration),
@@ -103,7 +117,7 @@ impl AdwsClient {
         show_deleted: bool,
     ) -> Result<Vec<SearchEntry>> {
         let mut out = Vec::new();
-        self.search_streaming(base, scope, ldap_filter, attrs, sd_flags, show_deleted, |e| {
+        self.search_streaming(base, scope, ldap_filter, attrs, sd_flags, show_deleted, None, |e| {
             out.push(e)
         })
         .await?;
@@ -120,12 +134,17 @@ impl AdwsClient {
         attrs: &[&str],
         sd_flags: Option<SdFlags>,
         show_deleted: bool,
+        batch: Option<usize>,
         mut sink: F,
     ) -> Result<usize>
     where
         F: FnMut(SearchEntry),
     {
-        info!("search base='{base}' scope={scope:?} filter='{ldap_filter}'");
+        // Objects requested per Pull: caller's value, else the default. Guard
+        // against 0 (which would make the server return nothing and never
+        // terminate on the short-read check).
+        let batch = batch.unwrap_or(DEFAULT_PULL_BATCH).max(1);
+        debug!("search base='{base}' scope={scope:?} filter='{ldap_filter}' batch={batch}");
         // Always request distinguishedName when a specific attribute set is
         // selected, so every entry carries its DN (needed for writes and for
         // RustHound-CE). An empty selection already returns all attributes.
@@ -159,7 +178,7 @@ impl AdwsClient {
         let mut batch_no = 0usize;
         loop {
             let pull_xml =
-                build_pull_request(&self.enumeration.url, &context, PULL_BATCH, sd_flags, show_deleted);
+                build_pull_request(&self.enumeration.url, &context, batch, sd_flags, show_deleted);
             let tree = self.enumeration.exchange(&pull_xml).await?;
             let pull = response::parse_pull_response(&tree)?;
 
@@ -177,12 +196,12 @@ impl AdwsClient {
                 context = c;
             }
             // A short read without EndOfSequence also terminates (some DCs omit it).
-            if n < PULL_BATCH {
+            if n < batch {
                 trace!("short pull batch without EndOfSequence, terminating");
                 break;
             }
         }
-        info!("search complete: {total} entries in {batch_no} batches");
+        debug!("search complete: {total} entries in {batch_no} batches");
         Ok(total)
     }
 
@@ -201,7 +220,7 @@ impl AdwsClient {
     /// delete) in a single WS-Transfer `Put`. `sd_flags` is required only when a
     /// change touches `nTSecurityDescriptor` (e.g. `Some(SdFlags(SdFlags::DACL))`).
     pub async fn modify(&mut self, dn: &str, mods: &[Mod], sd_flags: Option<SdFlags>) -> Result<()> {
-        info!("modify {dn} ({} change(s))", mods.len());
+        debug!("modify {dn} ({} change(s))", mods.len());
         let ldap_port = self.target.ldap_port;
         let ep = self.resource().await?;
         let body = transfer::build_modify_request(mods, sd_flags);
@@ -212,7 +231,7 @@ impl AdwsClient {
 
     /// Delete an object by DN (WS-Transfer `Delete`).
     pub async fn delete(&mut self, dn: &str) -> Result<()> {
-        info!("delete {dn}");
+        debug!("delete {dn}");
         let ldap_port = self.target.ldap_port;
         let ep = self.resource().await?;
         let xml = transfer::build_delete_request(&ep.url, dn, ldap_port);
@@ -238,7 +257,7 @@ impl AdwsClient {
     /// `ad:container-hierarchy-parent` (the parent container), which this method
     /// derives from `dn` and injects into the `AddRequest`.
     pub async fn create(&mut self, dn: &str, attrs: &[(String, Vec<Value>)]) -> Result<()> {
-        info!("create {dn} ({} attribute(s))", attrs.len());
+        debug!("create {dn} ({} attribute(s))", attrs.len());
         let (rdn, parent) = dn
             .split_once(',')
             .ok_or_else(|| AdwsError::Soap(format!("invalid DN (no parent container): {dn}")))?;
@@ -255,6 +274,64 @@ impl AdwsClient {
         ep.exchange(&xml).await?;
         Ok(())
     }
+
+    /// Ensure the `Windows/AccountManagement` endpoint is connected (for the
+    /// MS-ADCAP custom actions, e.g. `GetADGroupMember`).
+    async fn account_management(&mut self) -> Result<&mut Endpoint> {
+        if self.account_management.is_none() {
+            debug!("opening Windows/AccountManagement endpoint for custom actions");
+            let ep =
+                connect_endpoint(&self.target, &self.creds, account::ENDPOINT_ACCOUNT_MANAGEMENT)
+                    .await?;
+            self.account_management = Some(ep);
+        }
+        Ok(self.account_management.as_mut().unwrap())
+    }
+
+    /// Enumerate a group's members via the MS-ADCAP `GetADGroupMember` custom
+    /// action (the SOAP equivalent of `Get-ADGroupMember`).
+    ///
+    /// Unlike reading the `member` attribute with a search, this is NOT capped
+    /// at `MaxValRange` (default 1500): the DC resolves the full membership
+    /// server-side. It is the ADWS replacement for LDAP ranged retrieval, which
+    /// the ADWS selection dialect does not support.
+    ///
+    /// `recursive` expands nested-group membership server-side. The group's
+    /// partition (naming context) defaults to the `DC=` components of
+    /// `group_dn`; override it with [`AdwsClient::group_members_in`] when the
+    /// group lives outside the default domain partition.
+    pub async fn group_members(&mut self, group_dn: &str, recursive: bool) -> Result<Vec<GroupMember>> {
+        let partition = base_from_dn(group_dn);
+        self.group_members_in(group_dn, &partition, recursive).await
+    }
+
+    /// Like [`AdwsClient::group_members`] but with an explicit partition DN.
+    pub async fn group_members_in(
+        &mut self,
+        group_dn: &str,
+        partition_dn: &str,
+        recursive: bool,
+    ) -> Result<Vec<GroupMember>> {
+        debug!("GetADGroupMember {group_dn} (recursive={recursive})");
+        let ldap_port = self.target.ldap_port;
+        let ep = self.account_management().await?;
+        let xml = account::build_get_ad_group_member_request(
+            &ep.url, group_dn, partition_dn, recursive, ldap_port,
+        );
+        let tree = ep.exchange(&xml).await?;
+        let members = account::parse_get_ad_group_member_response(&tree)?;
+        debug!("GetADGroupMember returned {} member(s)", members.len());
+        Ok(members)
+    }
+}
+
+/// Extract the domain base DN (the `DC=` components) from a full DN.
+fn base_from_dn(dn: &str) -> String {
+    dn.split(',')
+        .map(str::trim)
+        .filter(|s| s.len() >= 3 && s[..3].eq_ignore_ascii_case("dc="))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl Endpoint {
